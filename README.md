@@ -1,5 +1,7 @@
 # SatSOM: Saturation Self-Organizing Map
 
+![Example SatSOM](./data/example.png)
+
 ## Overview
 
 **SatSOM** is a PyTorch implementation of a Saturation Self-Organizing Map (SatSOM), a proof-of-concept architecture for continual learning. It provides:
