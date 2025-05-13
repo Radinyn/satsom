@@ -83,7 +83,7 @@ Lr=0.01
 p=10
 n=10 # how many eval runs per job
 output_base="./output"
-device="mps"
+device="cuda"
 
 # make run‐specific output dir
 outdir="${output_base}/gs${gs}/lrbias${Lr_bias}/lrsig${lr_sigma}/q${q}/${dataset}"
