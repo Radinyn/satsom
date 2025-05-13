@@ -38,6 +38,9 @@ if [ ! -d "$VENV_DIR" ]; then
         echo "Warning: requirements.txt not found at $REQUIREMENTS"
     fi
 else
+    echo "Virtual environment already exists."
+    source "$VENV_DIR/bin/activate"
+fi
 
 # --- define grid lists ---
 grid_shapes=(50 100 250)              # 3
