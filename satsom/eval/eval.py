@@ -12,6 +12,7 @@ from tqdm.auto import tqdm
 from satsom.model import SatSOM, SatSOMParameters
 from satsom.visualization import create_satsom_image
 from satsom.eval.knn import KNNClassifier
+from satsom.eval.ewc import MLP_EWC, CNN_EWC
 
 
 class EvalDataset(Enum):
@@ -52,6 +53,8 @@ def eval_som(
         eval_limit: max test images per class for evaluation.
         phases: list of label-groups for phased training.
     """
+    assert epochs_per_phase == 1, "`epochs_per_phase != 1` is not yet supported"
+
     # ─── Setup ───────────────────────────────────────────────────────────────────
     out_dir = Path(output_path)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -97,9 +100,22 @@ def eval_som(
         by_label["train"][lbl] = imgs_lbl[:n_train]
         by_label["test"][lbl] = imgs_lbl[n_train:]
 
-    # ─── Model & KNN Setup ──────────────────────────────────────────────────────
+    # ─── Models Setup ──────────────────────────────────────────────────────
     model = SatSOM(som_params).to(device)
     knn = KNNClassifier(k=5)
+
+    # EWC models that run for 1 epoch
+    mlp_ewc = MLP_EWC(device=device)
+    cnn_ewc = CNN_EWC(device=device)
+
+    # EWC models that run for 10 epochs
+    mlp_ewc10 = MLP_EWC(device=device)
+    cnn_ewc10 = CNN_EWC(device=device)
+
+    opt_mlp = torch.optim.Adam(mlp_ewc.parameters(), lr=1e-4)
+    opt_cnn = torch.optim.Adam(cnn_ewc.parameters(), lr=1e-4)
+    opt_mlp10 = torch.optim.Adam(mlp_ewc10.parameters(), lr=1e-4)
+    opt_cnn10 = torch.optim.Adam(cnn_ewc10.parameters(), lr=1e-4)
 
     # ─── Training / Evaluation Loop ─────────────────────────────────────────────
     records = []
@@ -150,6 +166,24 @@ def eval_som(
                         img_height=28,
                     )
 
+        # Train EWC models on this phase data
+        batch_data = imgs.view(-1, 1, 28, 28)
+        batch_flat = batch_data.view(batch_data.size(0), -1)
+        for model_obj, opt_obj, ewc_epochs, name in [
+            (mlp_ewc, opt_mlp, 1, "mlp_ewc"),
+            (cnn_ewc, opt_cnn, 1, "cnn_ewc"),
+            (mlp_ewc10, opt_mlp10, 10, "mlp_ewc10"),
+            (cnn_ewc10, opt_cnn10, 10, "cnn_ewc10"),
+        ]:
+            if "mlp" in name:
+                model_obj.partial_fit(
+                    opt_obj, batch_flat, labs.squeeze(1), epochs=ewc_epochs
+                )
+            else:
+                model_obj.partial_fit(
+                    opt_obj, batch_data, labs.squeeze(1), epochs=ewc_epochs
+                )
+
         # ─── Evaluation ─────────────────────────────────────────────────────────
         create_satsom_image(
             model,
@@ -161,25 +195,52 @@ def eval_som(
         logger.info(f"Evaluating after Phase {phase_idx}")
         model.eval()
         for lbl in unique_labels:
-            test_imgs = by_label["test"][lbl][:eval_limit]
+            test = by_label["test"][lbl][:eval_limit]
             # SOM
-            correct_som = 0
-            for img in test_imgs:
-                out = model(img.unsqueeze(0))
-                if out.argmax().item() == lbl:
-                    correct_som += 1
-            acc_som = 100 * correct_som / len(test_imgs)
-            # KNN
-            knn_preds = knn.predict(test_imgs)
-            acc_knn = 100 * (knn_preds == lbl).sum().item() / len(knn_preds)
-            # log and record
-            logger.info(f"Label {lbl}: SOM {acc_som:.2f}%, KNN {acc_knn:.2f}%")
+            correct_som = sum(
+                (model(img.unsqueeze(0)).argmax().item() == lbl) for img in test
+            )
+            acc_som = 100 * correct_som / len(test)
+            # kNN
+            knn_preds = knn.predict(test)
+            acc_knn = 100 * (knn_preds == lbl).sum().item() / len(test)
+            # EWC models
+            # prepare test tensors
+            test_flat = test
+            test_cnn = test.view(-1, 1, 28, 28)
+            acc_mlp = (
+                100 * (mlp_ewc(test_flat).argmax(dim=1) == lbl).sum().item() / len(test)
+            )
+            acc_cnn = (
+                100 * (cnn_ewc(test_cnn).argmax(dim=1) == lbl).sum().item() / len(test)
+            )
+            acc_mlp10 = (
+                100
+                * (mlp_ewc10(test_flat).argmax(dim=1) == lbl).sum().item()
+                / len(test)
+            )
+            acc_cnn10 = (
+                100
+                * (cnn_ewc10(test_cnn).argmax(dim=1) == lbl).sum().item()
+                / len(test)
+            )
+
+            logger.info(
+                f"Label {lbl}: SOM {acc_som:.2f}%, kNN {acc_knn:.2f}%, "
+                f"MLP_EWC {acc_mlp:.2f}%, CNN_EWC {acc_cnn:.2f}%, "
+                f"MLP_EWC10 {acc_mlp10:.2f}%, CNN_EWC10 {acc_cnn10:.2f}%"
+            )
+
             records.append(
                 {
                     "phase": phase_idx,
                     "label": lbl,
                     "accuracy_som": acc_som,
                     "accuracy_knn": acc_knn,
+                    "accuracy_mlp_ewc": acc_mlp,
+                    "accuracy_cnn_ewc": acc_cnn,
+                    "accuracy_mlp_ewc10": acc_mlp10,
+                    "accuracy_cnn_ewc10": acc_cnn10,
                 }
             )
 
