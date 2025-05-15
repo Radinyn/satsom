@@ -169,12 +169,16 @@ def eval_som(
         # Train EWC models on this phase data
         batch_data = imgs.view(-1, 1, 28, 28)
         batch_flat = batch_data.view(batch_data.size(0), -1)
-        for model_obj, opt_obj, ewc_epochs, name in [
-            (mlp_ewc, opt_mlp, 1, "mlp_ewc"),
-            (cnn_ewc, opt_cnn, 1, "cnn_ewc"),
-            (mlp_ewc10, opt_mlp10, 10, "mlp_ewc10"),
-            (cnn_ewc10, opt_cnn10, 10, "cnn_ewc10"),
-        ]:
+        for model_obj, opt_obj, ewc_epochs, name in tqdm(
+            [
+                (mlp_ewc, opt_mlp, 1, "mlp_ewc"),
+                (cnn_ewc, opt_cnn, 1, "cnn_ewc"),
+                (mlp_ewc10, opt_mlp10, 10, "mlp_ewc10"),
+                (cnn_ewc10, opt_cnn10, 10, "cnn_ewc10"),
+            ],
+            desc="Training EWC",
+            leave=False,
+        ):
             if "mlp" in name:
                 model_obj.partial_fit(
                     opt_obj, batch_flat, labs.squeeze(1), epochs=ewc_epochs
