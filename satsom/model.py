@@ -73,7 +73,7 @@ class SatSOM(nn.Module):
         saturation = (
             self.params.initial_lr - self.learning_rates
         ) / self.params.initial_lr
-        mask = saturation.repeat(batch_size, 1) < q  # under-saturated
+        mask = saturation.repeat(batch_size, 1) < 1e-4  # under-saturated
         dists[mask] = 1.0
 
         # Disable neurons beyond quantile threshold
