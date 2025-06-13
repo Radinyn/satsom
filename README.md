@@ -1,5 +1,7 @@
 # SatSOM: Saturation Self-Organizing Map
 
+The paper is available on arXiv: [link](https://arxiv.org/abs/2506.10680)
+
 ![Example SatSOM](./data/example.png)
 
 ## Overview
