@@ -7,14 +7,13 @@ from collections import defaultdict
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.utils.data import DataLoader, Dataset, TensorDataset
+from torch.utils.data import DataLoader, Dataset
 from torchvision import transforms, models
 from tqdm.auto import tqdm
 from PIL import Image
 
+# Assuming these exist in your environment
 from satsom.model import SatSOM, SatSOMParameters
-
-# from satsom.visualization import create_satsom_image # Visualizer disabled for embeddings
 from satsom.eval.knn import KNNClassifier
 
 from satsom.eval.dsdm import DSDMClassifier
@@ -22,11 +21,20 @@ from satsom.eval.propre import PROPREClassifier
 
 
 # ---------------------------------------------------------
-# 1. Feature Extractor Logic
+# 1. Feature Extractor Logic (Updated for sX/oY structure)
 # ---------------------------------------------------------
 class Core50ImageDataset(Dataset):
     """
-    Helper dataset just to load images for the feature extractor.
+    Custom loader for Core50 structure:
+       root/
+         s1/
+           o1/ -> images
+           o2/ -> images
+         s2/
+           o1/ ...
+
+    It aggregates all 'o1' folders from all sessions into Class 0,
+    all 'o2' folders into Class 1, etc.
     """
 
     def __init__(self, root, transform=None):
@@ -36,18 +44,55 @@ class Core50ImageDataset(Dataset):
         if not os.path.exists(root):
             raise FileNotFoundError(f"Core50 root not found: {root}")
 
-        classes = sorted(os.listdir(root))
-        self.class_to_idx = {c: i for i, c in enumerate(classes)}
+        # 1. Scan for all unique Object names (o1, o2...) to build class index
+        object_names = set()
 
-        for cls in classes:
-            p = os.path.join(root, cls)
-            if not os.path.isdir(p):
+        # Traverse sessions (s1, s2, ...)
+        for session_name in os.listdir(root):
+            session_path = os.path.join(root, session_name)
+            if not os.path.isdir(session_path):
                 continue
-            for fname in os.listdir(p):
-                if fname.lower().endswith(("png", "jpg", "jpeg")):
-                    self.samples.append(
-                        (os.path.join(p, fname), self.class_to_idx[cls])
-                    )
+
+            # Traverse objects inside session
+            for obj_name in os.listdir(session_path):
+                if obj_name.startswith("o") and os.path.isdir(
+                    os.path.join(session_path, obj_name)
+                ):
+                    object_names.add(obj_name)
+
+        # Sort objects naturally (o1, o2, ... o10, not o1, o10, o11, o2)
+        # We assume folders are named 'o{number}'
+        try:
+            sorted_objects = sorted(
+                list(object_names), key=lambda x: int(x.replace("o", ""))
+            )
+        except ValueError:
+            # Fallback if folders aren't strictly o{int}
+            sorted_objects = sorted(list(object_names))
+
+        self.class_to_idx = {o: i for i, o in enumerate(sorted_objects)}
+        print(f"Found {len(self.class_to_idx)} unique classes across sessions.")
+
+        # 2. Collect all images
+        for session_name in os.listdir(root):
+            session_path = os.path.join(root, session_name)
+            if not os.path.isdir(session_path):
+                continue
+
+            for obj_name in os.listdir(session_path):
+                obj_path = os.path.join(session_path, obj_name)
+                if not os.path.isdir(obj_path):
+                    continue
+
+                # Get label ID
+                if obj_name not in self.class_to_idx:
+                    continue
+                lbl = self.class_to_idx[obj_name]
+
+                # Collect images
+                for fname in os.listdir(obj_path):
+                    if fname.lower().endswith(("png", "jpg", "jpeg")):
+                        self.samples.append((os.path.join(obj_path, fname), lbl))
 
     def __len__(self):
         return len(self.samples)
@@ -80,17 +125,20 @@ def get_resnet_embeddings(
 
     # 2. Load Model
     # Using ResNet18. Output dim will be 512.
-    # For ResNet50, output dim is 2048.
     model = models.resnet18(weights=models.ResNet18_Weights.IMAGENET1K_V1)
-
-    # Remove the classification head (fc layer)
-    # We keep the backbone + average pooling
     model.fc = nn.Identity()
     model.to(device)
     model.eval()
 
     # 3. Create Loader
+    # This now uses the nested sX/oY logic
     raw_dataset = Core50ImageDataset(root, transform=transform)
+
+    if len(raw_dataset) == 0:
+        raise ValueError(
+            f"No images found in {root}. Check structure (root/sX/oY/img.png)"
+        )
+
     loader = DataLoader(
         raw_dataset, batch_size=batch_size, shuffle=False, num_workers=4
     )
@@ -117,30 +165,6 @@ def get_resnet_embeddings(
     return features, labels
 
 
-def load_core50_features(
-    root: str, device: str, train_split: float = 0.8
-) -> Tuple[Dataset, Dataset, int]:
-    """
-    Loads Core50, converts to embeddings, splits into train/test.
-    Returns (TrainSet, TestSet, InputDimension)
-    """
-    features, labels = get_resnet_embeddings(root, device)
-
-    dataset = TensorDataset(features, labels)
-
-    n = len(dataset)
-    n_train = int(n * train_split)
-    train_set, test_set = torch.utils.data.random_split(
-        dataset, [n_train, n - n_train], generator=torch.Generator().manual_seed(0)
-    )
-
-    input_dim = features.shape[1]
-    return train_set, test_set, input_dim
-
-
-# ---------------------------------------------------------
-# Evaluation function
-# ---------------------------------------------------------
 def eval_som(
     som_params: SatSOMParameters,
     core50_root: str,
@@ -173,30 +197,17 @@ def eval_som(
     # ----------------------------------------------
     logger.info("Loading CORE50 and extracting ResNet features...")
 
-    # Note: We perform extraction on 'device' to speed it up,
-    # then move data to CPU RAM, then back to device during training loop
-    # to save GPU VRAM for the models.
-    train_set, test_set, input_dim = load_core50_features(
-        core50_root, device=device, train_split=0.8
-    )
+    features, labels = get_resnet_embeddings(core50_root, device)
 
-    # Override the input dimension in params to match ResNet output (e.g., 512)
+    # Auto-detect dimension (512 for ResNet18)
+    input_dim = features.shape[1]
     som_params.input_dim = input_dim
     logger.info(f"Input dimension determined from ResNet: {input_dim}")
 
-    # Helper to aggregate data from the subset
-    def collect_data(dataset):
-        loader = DataLoader(dataset, batch_size=128, shuffle=False)
-        f_list, l_list = [], []
-        for f, lbl in loader:
-            f_list.append(f)
-            l_list.append(lbl)
-        return torch.cat(f_list).to(device), torch.cat(l_list).to(device)
-
-    images, labels = collect_data(train_set)
-
-    # We also need the test set loaded for evaluation
-    test_images_all, test_labels_all = collect_data(test_set)
+    # Move data to GPU for training (Core50 is ~128k images, embeddings fit in VRAM)
+    # If OOM occurs, keep on CPU and move batches manually
+    images = features.to(device)
+    labels = labels.to(device)
 
     unique_labels = sorted(labels.unique().tolist())
     n_classes = len(unique_labels)
@@ -208,18 +219,22 @@ def eval_som(
     by_label = defaultdict(dict)
 
     # Split logic:
-    # Since we already did a random split in `load_core50_features`,
-    # 'train_set' is used for online training, 'test_set' for eval.
-    # We just organize 'train_set' by label here for the phasing.
+    # Core50 is usually trained by Session (Dom-IL) or Class (Class-IL).
+    # This script does Class-IL (splitting each class into train/test randomly).
+    # If you want strict Session-based splitting (train on s1, test on s2),
+    # logic needs changing, but standard Class-IL is random split per class.
 
     for lbl in unique_labels:
-        # Training Data
-        mask_train = labels == lbl
-        by_label["train"][lbl] = images[mask_train]
+        mask = labels == lbl
+        imgs_lbl = images[mask]
 
-        # Testing Data
-        mask_test = test_labels_all == lbl
-        by_label["test"][lbl] = test_images_all[mask_test]
+        # Shuffle for random split
+        perm = torch.randperm(len(imgs_lbl))
+        imgs_lbl = imgs_lbl[perm]
+
+        n_train = int(len(imgs_lbl) * train_perc)
+        by_label["train"][lbl] = imgs_lbl[:n_train]
+        by_label["test"][lbl] = imgs_lbl[n_train:]
 
     # default phasing: each class one by one
     if phases is None:
@@ -305,11 +320,6 @@ def eval_som(
             # PROPRE
             propre.partial_fit(img.unsqueeze(0), label.unsqueeze(0))
 
-            # [NOTE] Visualization Disabled
-            # Since inputs are ResNet embeddings (vectors), not images,
-            # we cannot use create_satsom_image(width=28, height=28).
-            # Using it would result in a dimension mismatch or random noise.
-
         # ----------------------------------------------
         # Evaluation
         # ----------------------------------------------
@@ -324,8 +334,6 @@ def eval_som(
                 continue
 
             # SOM
-            # Note: SatSOM needs batch dim
-            # We process in batches for speed during eval
             preds_som = []
             for t_img in test_imgs:
                 preds_som.append(model(t_img.unsqueeze(0)).argmax().item())
@@ -375,10 +383,9 @@ def eval_som(
 # CLI
 # ---------------------------------------------------------
 if __name__ == "__main__":
-    # Initial params - input_dim will be overwritten by the loader
     params = SatSOMParameters(
         grid_shape=(60, 60),
-        input_dim=512,  # Placeholder, will update automatically
+        input_dim=512,
         output_dim=50,
         initial_lr=0.5,
         initial_sigma=30.0,
@@ -391,6 +398,8 @@ if __name__ == "__main__":
 
     eval_som(
         som_params=params,
-        core50_root="./core50",
+        core50_root="./core50_128x128",
         output_path="./output_core50",
+        # size_limit=20000,
+        # eval_limit=2000,
     )
