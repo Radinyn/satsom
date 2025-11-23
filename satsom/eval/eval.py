@@ -33,7 +33,7 @@ def eval_som(
     epochs_per_phase: int = 1,
     size_limit: Optional[int] = None,
     eval_limit: Optional[int] = None,
-    phases: list[list[int]] = ([0, 1, 2, 4, 5, 6, 7, 8], [3, 9]),
+    phases: list[list[int]] = ([0], [1], [2], [4], [5], [6], [7], [8], [3], [9]),
     dataset: EvalDataset = EvalDataset.FashionMNIST,
     dataset_root_dir: Optional[str] = None,
 ):
