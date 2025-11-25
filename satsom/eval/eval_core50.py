@@ -180,7 +180,7 @@ def get_core50_data(
     return train_x, train_y, test_x, test_y
 
 
-def eval_core50_nc(
+def eval_som(
     som_params: SatSOMParameters,
     core50_root: str,
     output_path: str,
@@ -375,7 +375,7 @@ if __name__ == "__main__":
         p=10,
     )
 
-    eval_core50_nc(
+    eval_som(
         som_params=params,
         core50_root="./core50_128x128",
         output_path="./output_core50_nc",
