@@ -210,11 +210,7 @@ def main():
                 core50_root=args.dataset_root,
                 output_path=str(run_output_path),
                 device=args.device,
-                train_perc=args.train_perc,
-                size_limit=args.size_limit,
-                eval_limit=args.eval_limit,
                 save_model=args.save_model,
-                show_progress=args.show_progress,
             )
 
         elif args.dataset == "online":
