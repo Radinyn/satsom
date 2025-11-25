@@ -1,8 +1,7 @@
 import logging
 import os
 from pathlib import Path
-from typing import Optional, Tuple
-from collections import defaultdict
+from typing import Tuple
 
 import torch
 import torch.nn as nn
@@ -11,372 +10,352 @@ from torch.utils.data import DataLoader, Dataset
 from torchvision import transforms, models
 from tqdm.auto import tqdm
 from PIL import Image
+import pandas as pd
 
-# Assuming these exist in your environment
 from satsom.model import SatSOM, SatSOMParameters
 from satsom.eval.knn import KNNClassifier
-
 from satsom.eval.dsdm import DSDMClassifier
 from satsom.eval.propre import PROPREClassifier
 
 
 # ---------------------------------------------------------
-# 1. Feature Extractor Logic (Updated for sX/oY structure)
+# 1. Feature Extractor & Dataset Logic
 # ---------------------------------------------------------
-class Core50ImageDataset(Dataset):
+class Core50SessionDataset(Dataset):
     """
-    Custom loader for Core50 structure:
+    Custom loader for Core50 that tracks Session IDs.
+    Structure assumed:
        root/
          s1/
            o1/ -> images
-           o2/ -> images
+           o2/ ...
          s2/
-           o1/ ...
-
-    It aggregates all 'o1' folders from all sessions into Class 0,
-    all 'o2' folders into Class 1, etc.
+           ...
     """
 
     def __init__(self, root, transform=None):
-        self.samples = []
+        self.samples = []  # (path, label, session_id)
         self.transform = transform
 
         if not os.path.exists(root):
             raise FileNotFoundError(f"Core50 root not found: {root}")
 
-        # 1. Scan for all unique Object names (o1, o2...) to build class index
+        # 1. Scan for all unique Object names to build class index
         object_names = set()
 
-        # Traverse sessions (s1, s2, ...)
+        # Valid sessions in Core50 are s1..s11.
+        # We scan everything but only parse those matching 'sX'.
         for session_name in os.listdir(root):
+            if not session_name.startswith("s"):
+                continue
+
             session_path = os.path.join(root, session_name)
             if not os.path.isdir(session_path):
                 continue
 
-            # Traverse objects inside session
             for obj_name in os.listdir(session_path):
+                # We assume folders are named 'o{number}'
                 if obj_name.startswith("o") and os.path.isdir(
                     os.path.join(session_path, obj_name)
                 ):
                     object_names.add(obj_name)
 
-        # Sort objects naturally (o1, o2, ... o10, not o1, o10, o11, o2)
-        # We assume folders are named 'o{number}'
+        # Sort objects naturally (o1...o50)
         try:
             sorted_objects = sorted(
                 list(object_names), key=lambda x: int(x.replace("o", ""))
             )
         except ValueError:
-            # Fallback if folders aren't strictly o{int}
             sorted_objects = sorted(list(object_names))
 
         self.class_to_idx = {o: i for i, o in enumerate(sorted_objects)}
-        print(f"Found {len(self.class_to_idx)} unique classes across sessions.")
+        print(f"Found {len(self.class_to_idx)} unique classes.")
 
-        # 2. Collect all images
+        # 2. Collect all images with Session ID
         for session_name in os.listdir(root):
+            if not session_name.startswith("s"):
+                continue
+
+            # Extract session number (e.g. 's1' -> 1)
+            try:
+                session_id = int(session_name.replace("s", ""))
+            except ValueError:
+                continue
+
             session_path = os.path.join(root, session_name)
             if not os.path.isdir(session_path):
                 continue
 
             for obj_name in os.listdir(session_path):
-                obj_path = os.path.join(session_path, obj_name)
-                if not os.path.isdir(obj_path):
-                    continue
-
-                # Get label ID
                 if obj_name not in self.class_to_idx:
                     continue
+
+                obj_path = os.path.join(session_path, obj_name)
                 lbl = self.class_to_idx[obj_name]
 
-                # Collect images
                 for fname in os.listdir(obj_path):
                     if fname.lower().endswith(("png", "jpg", "jpeg")):
-                        self.samples.append((os.path.join(obj_path, fname), lbl))
+                        self.samples.append(
+                            (os.path.join(obj_path, fname), lbl, session_id)
+                        )
 
     def __len__(self):
         return len(self.samples)
 
     def __getitem__(self, idx):
-        path, lbl = self.samples[idx]
+        path, lbl, sid = self.samples[idx]
         img = Image.open(path).convert("RGB")
         if self.transform:
             img = self.transform(img)
-        return img, lbl
+        # Return tuple: (image, label, session_id)
+        return img, lbl, sid
 
 
-def get_resnet_embeddings(
+def get_core50_data(
     root: str, device: str, batch_size: int = 64
-) -> Tuple[torch.Tensor, torch.Tensor]:
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """
-    Iterates through the Core50 folder, passes images through ResNet18,
-    and returns (Embeddings, Labels).
+    Extracts ResNet features and splits them into Train/Test based on Core50 protocol.
+
+    Protocol:
+    - Test Sessions: 3, 7, 10
+    - Train Sessions: 1, 2, 4, 5, 6, 8, 9, 11
+
+    Returns: (train_x, train_y, test_x, test_y)
     """
     print(f"Generating embeddings using ResNet18 on {device}...")
 
-    # 1. Setup Preprocessing for ResNet (ImageNet Stats)
+    # Standard ImageNet normalization
     transform = transforms.Compose(
         [
-            transforms.Resize((224, 224)),  # ResNet standard input
+            transforms.Resize(
+                (128, 128)
+            ),  # Core50 native size is 128, but ResNet likes 224 usually.
+            # However, for speed on Core50, 128 is often used with adaptive pooling.
+            # If you strictly want ResNet stats, resize to 224.
+            # We will resize to 224 to be safe for the pre-trained weights.
+            transforms.Resize((224, 224)),
             transforms.ToTensor(),
             transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
         ]
     )
 
-    # 2. Load Model
-    # Using ResNet18. Output dim will be 512.
     model = models.resnet18(weights=models.ResNet18_Weights.IMAGENET1K_V1)
     model.fc = nn.Identity()
     model.to(device)
     model.eval()
 
-    # 3. Create Loader
-    # This now uses the nested sX/oY logic
-    raw_dataset = Core50ImageDataset(root, transform=transform)
-
-    if len(raw_dataset) == 0:
-        raise ValueError(
-            f"No images found in {root}. Check structure (root/sX/oY/img.png)"
-        )
-
-    loader = DataLoader(
-        raw_dataset, batch_size=batch_size, shuffle=False, num_workers=4
-    )
+    dataset = Core50SessionDataset(root, transform=transform)
+    loader = DataLoader(dataset, batch_size=batch_size, shuffle=False, num_workers=4)
 
     all_feats = []
     all_labels = []
+    all_sessions = []
 
-    # 4. Inference Loop
     with torch.no_grad():
-        for imgs, lbls in tqdm(loader, desc="Extracting Features"):
+        for imgs, lbls, sids in tqdm(loader, desc="Extracting Features"):
             imgs = imgs.to(device)
-            # Forward pass
             feats = model(imgs)
-            # Flatten just in case (B, 512)
             feats = feats.view(feats.size(0), -1)
 
             all_feats.append(feats.cpu())
             all_labels.append(lbls)
+            all_sessions.append(sids)
 
     features = torch.cat(all_feats)
     labels = torch.cat(all_labels)
+    sessions = torch.cat(all_sessions)
 
-    print(f"Feature extraction complete. Shape: {features.shape}")
-    return features, labels
+    # Core50 Official Split
+    test_mask = (sessions == 3) | (sessions == 7) | (sessions == 10)
+    train_mask = ~test_mask
+
+    train_x, train_y = features[train_mask], labels[train_mask]
+    test_x, test_y = features[test_mask], labels[test_mask]
+
+    print("Data Split Complete.")
+    print(f"Train: {train_x.shape[0]} samples (Sessions 1,2,4,5,6,8,9,11)")
+    print(f"Test:  {test_x.shape[0]} samples (Sessions 3,7,10)")
+
+    return train_x, train_y, test_x, test_y
 
 
-def eval_som(
+def eval_core50_nc(
     som_params: SatSOMParameters,
     core50_root: str,
     output_path: str,
     device: str = "cuda" if torch.cuda.is_available() else "cpu",
-    train_perc: float = 0.8,
-    size_limit: Optional[int] = None,
-    eval_limit: Optional[int] = None,
-    phases: Optional[list[list[int]]] = None,
     save_model: bool = False,
-    show_progress: bool = True,
 ):
     """
-    CORE50 continual learning evaluation on EMBEDDINGS.
-    """
+    Executes the Core50 NC (New Classes) Benchmark.
 
+    Setting: Class-Incremental
+    Total Classes: 50
+    Tasks: 9
+       - Task 0: 10 classes
+       - Task 1-8: 5 classes each
+    """
     out_dir = Path(output_path)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    logger = logging.getLogger("eval_core50")
-    handler = logging.StreamHandler()
-    fmt = "%(asctime)s %(levelname)s %(message)s"
-    handler.setFormatter(logging.Formatter(fmt))
-    if not logger.handlers:
-        logger.addHandler(handler)
+    # Logging setup
+    logger = logging.getLogger("core50_nc")
     logger.setLevel(logging.INFO)
+    if not logger.handlers:
+        ch = logging.StreamHandler()
+        ch.setFormatter(logging.Formatter("%(asctime)s %(levelname)s: %(message)s"))
+        logger.addHandler(ch)
 
-    # ----------------------------------------------
-    # Load data (Features)
-    # ----------------------------------------------
-    logger.info("Loading CORE50 and extracting ResNet features...")
+    # 1. Load Data & Extract Features
+    logger.info("Preparing Data...")
+    train_x, train_y, test_x, test_y = get_core50_data(core50_root, device)
 
-    features, labels = get_resnet_embeddings(core50_root, device)
+    # Move to GPU
+    train_x = train_x.to(device)
+    train_y = train_y.to(device)
+    test_x = test_x.to(device)
+    test_y = test_y.to(device)
 
-    # Auto-detect dimension (512 for ResNet18)
-    input_dim = features.shape[1]
+    # 2. Define Tasks (NC Scenario)
+    # Task 0: Classes 0-9 (10 classes)
+    # Task 1..8: Classes 10-14, 15-19, ... (5 classes each)
+    n_total_classes = 50
+
+    tasks = []
+
+    # First batch: 10 classes
+    tasks.append(list(range(0, 10)))
+
+    # Remaining batches: 5 classes each
+    curr = 10
+    while curr < 50:
+        end = min(curr + 5, 50)
+        tasks.append(list(range(curr, end)))
+        curr = end
+
+    logger.info(f"Defined {len(tasks)} tasks.")
+    logger.info(f"Task 0 classes: {tasks[0]}")
+    logger.info(f"Task 1 classes: {tasks[1]} ...")
+
+    # 3. Initialize Models
+    input_dim = train_x.shape[1]
     som_params.input_dim = input_dim
-    logger.info(f"Input dimension determined from ResNet: {input_dim}")
 
-    # Move data to GPU for training (Core50 is ~128k images, embeddings fit in VRAM)
-    # If OOM occurs, keep on CPU and move batches manually
-    images = features.to(device)
-    labels = labels.to(device)
-
-    unique_labels = sorted(labels.unique().tolist())
-    n_classes = len(unique_labels)
-
-    size_limit = size_limit or len(images)
-    eval_limit = eval_limit or len(images)
-
-    # Organize data by label for the phase creation
-    by_label = defaultdict(dict)
-
-    # Split logic:
-    # Core50 is usually trained by Session (Dom-IL) or Class (Class-IL).
-    # This script does Class-IL (splitting each class into train/test randomly).
-    # If you want strict Session-based splitting (train on s1, test on s2),
-    # logic needs changing, but standard Class-IL is random split per class.
-
-    for lbl in unique_labels:
-        mask = labels == lbl
-        imgs_lbl = images[mask]
-
-        # Shuffle for random split
-        perm = torch.randperm(len(imgs_lbl))
-        imgs_lbl = imgs_lbl[perm]
-
-        n_train = int(len(imgs_lbl) * train_perc)
-        by_label["train"][lbl] = imgs_lbl[:n_train]
-        by_label["test"][lbl] = imgs_lbl[n_train:]
-
-    # default phasing: each class one by one
-    if phases is None:
-        phases = [[lbl] for lbl in unique_labels]
-
-    # ----------------------------------------------
-    # Models
-    # ----------------------------------------------
-    logger.info("Initializing models...")
     model = SatSOM(som_params).to(device)
     knn = KNNClassifier(k=5)
-
-    dsdm = DSDMClassifier(
-        input_dim=input_dim,
-        n_classes=n_classes,
-        T=2.0,
-        ema=0.02,
-        pruning=False,
-        device=device,
-    )
-
+    dsdm = DSDMClassifier(input_dim=input_dim, n_classes=n_total_classes, device=device)
     propre = PROPREClassifier(
-        input_dim=input_dim,
-        nH=15,
-        n_classes=n_classes,
-        device=device,
-        lr_som=0.05,
-        lr_lr=0.1,
-        kappa=1.0,
-        theta=0.6,
-        p=10,
+        input_dim=input_dim, nH=15, n_classes=n_total_classes, device=device
     )
 
-    # ----------------------------------------------
-    # Training loop
-    # ----------------------------------------------
     records = []
 
-    for phase_idx, phase_labels in enumerate(phases, start=1):
-        logger.info(f"=== Phase {phase_idx}: labels {phase_labels} ===")
+    # 4. Continual Learning Loop
+    for task_idx, class_group in enumerate(tasks):
+        logger.info(f"\n=== Starting Task {task_idx} (Classes: {class_group}) ===")
 
-        # Gather training data for this phase
-        imgs_list = [
-            by_label["train"][lbl] for lbl in phase_labels if lbl in by_label["train"]
-        ]
+        # Filter Train Data for current task
+        # We only train on images belonging to the current classes
+        mask = torch.isin(train_y, torch.tensor(class_group, device=device))
+        task_x = train_x[mask]
+        task_y = train_y[mask]
 
-        if not imgs_list:
-            logger.warning(f"No data found for labels {phase_labels}, skipping phase.")
-            continue
+        # Shuffle
+        perm = torch.randperm(len(task_x))
+        task_x = task_x[perm]
+        task_y = task_y[perm]
 
-        imgs = torch.cat(imgs_list)
-        labs = torch.cat(
-            [
-                torch.full((len(by_label["train"][lbl]),), lbl, device=device)
-                for lbl in phase_labels
-                if lbl in by_label["train"]
-            ]
+        # Train Loop
+        model.train()
+        for i, (img, lbl) in enumerate(
+            tqdm(zip(task_x, task_y), total=len(task_x), desc="Training")
+        ):
+            img = img.unsqueeze(0)
+            lbl = lbl.unsqueeze(0)
+
+            # SatSOM
+            lbl_oh = F.one_hot(lbl, num_classes=n_total_classes).float()
+            model.step(img, lbl_oh)
+
+            # Others
+            knn.partial_fit(img, lbl)
+            dsdm.partial_fit(img, lbl)
+            propre.partial_fit(img, lbl)
+
+        # ------------------------------------------------
+        # Evaluation
+        # ------------------------------------------------
+        # In Core50 NC, evaluation is usually done on the FULL test set (all 50 classes)
+        # to see how accuracy evolves globally.
+
+        logger.info(f"Evaluating Task {task_idx} on full test set...")
+
+        # Batch evaluation to save GPU memory
+        eval_batch_size = 1000
+        n_test = len(test_x)
+
+        # Accumulators
+        correct_som = 0
+        correct_knn = 0
+        correct_dsdm = 0
+        correct_propre = 0
+
+        with torch.no_grad():
+            for i in range(0, n_test, eval_batch_size):
+                end = min(i + eval_batch_size, n_test)
+                batch_x = test_x[i:end]
+                batch_y = test_y[i:end]
+
+                # SatSOM
+                preds_som = []
+                for bx in batch_x:
+                    preds_som.append(model(bx.unsqueeze(0)).argmax().item())
+                correct_som += torch.sum(
+                    torch.tensor(preds_som, device=device) == batch_y
+                ).item()
+
+                # kNN
+                p_knn = knn.predict(batch_x)
+                correct_knn += (p_knn == batch_y).sum().item()
+
+                # DSDM
+                p_dsdm = dsdm.predict(batch_x).argmax(1)
+                correct_dsdm += (p_dsdm == batch_y).sum().item()
+
+                # PROPRE
+                p_propre = propre.predict(batch_x).argmax(1)
+                correct_propre += (p_propre == batch_y).sum().item()
+
+        acc_som = (correct_som / n_test) * 100
+        acc_knn = (correct_knn / n_test) * 100
+        acc_dsdm = (correct_dsdm / n_test) * 100
+        acc_propre = (correct_propre / n_test) * 100
+
+        logger.info(f"Task {task_idx} Result (Acc % on all 50 classes):")
+        logger.info(
+            f"SOM: {acc_som:.2f} | kNN: {acc_knn:.2f} | DSDM: {acc_dsdm:.2f} | PROPRE: {acc_propre:.2f}"
         )
 
-        # Shuffle training data
-        perm = torch.randperm(len(imgs))[:size_limit]
-        imgs = imgs[perm]
-        labs = labs[perm]
-
-        n_samples = len(imgs)
-        iterator = enumerate(zip(imgs, labs), start=1)
-
-        if show_progress:
-            iterator = tqdm(iterator, total=n_samples, desc=f"Phase {phase_idx}")
-
-        # update models
-        for i, (img, label) in iterator:
-            # SatSOM
-            lbl_oh = F.one_hot(label, num_classes=n_classes).float()
-            model.step(img.unsqueeze(0), lbl_oh.unsqueeze(0))
-
-            # kNN
-            knn.partial_fit(img.unsqueeze(0), label.unsqueeze(0))
-
-            # DSDM
-            dsdm.partial_fit(img.unsqueeze(0), label.unsqueeze(0))
-
-            # PROPRE
-            propre.partial_fit(img.unsqueeze(0), label.unsqueeze(0))
-
-        # ----------------------------------------------
-        # Evaluation
-        # ----------------------------------------------
-        logger.info(f"Evaluating Phase {phase_idx}...")
-
-        for lbl in unique_labels:
-            if lbl not in by_label["test"]:
-                continue
-
-            test_imgs = by_label["test"][lbl][:eval_limit]
-            if len(test_imgs) == 0:
-                continue
-
-            # SOM
-            preds_som = []
-            for t_img in test_imgs:
-                preds_som.append(model(t_img.unsqueeze(0)).argmax().item())
-
-            acc_som = 100 * sum(p == lbl for p in preds_som) / len(preds_som)
-
-            # kNN
-            knn_pred = knn.predict(test_imgs)
-            acc_knn = 100 * (knn_pred == lbl).sum().item() / len(test_imgs)
-
-            # DSDM
-            dsdm_pred = dsdm.predict(test_imgs).argmax(1)
-            acc_dsdm = 100 * (dsdm_pred == lbl).sum().item() / len(test_imgs)
-
-            # PROPRE
-            propre_pred = propre.predict(test_imgs).argmax(1)
-            acc_propre = 100 * (propre_pred == lbl).sum().item() / len(test_imgs)
-
-            logger.info(
-                f"Class {lbl}: SOM {acc_som:.2f}% | kNN {acc_knn:.2f}% "
-                f"| DSDM {acc_dsdm:.2f}% | PROPRE {acc_propre:.2f}%"
-            )
-
-            records.append(
-                {
-                    "phase": phase_idx,
-                    "label": lbl,
-                    "som": acc_som,
-                    "knn": acc_knn,
-                    "dsdm": acc_dsdm,
-                    "propre": acc_propre,
-                }
-            )
+        records.append(
+            {
+                "task_id": task_idx,
+                "classes_added": str(class_group),
+                "som_acc": acc_som,
+                "knn_acc": acc_knn,
+                "dsdm_acc": acc_dsdm,
+                "propre_acc": acc_propre,
+            }
+        )
 
         if save_model:
-            torch.save(model.state_dict(), out_dir / f"som_phase{phase_idx}.pth")
+            torch.save(model.state_dict(), out_dir / f"som_task{task_idx}.pth")
 
-    # save CSV
-    import pandas as pd
-
+    # Save Results
     df = pd.DataFrame(records)
-    df.to_csv(out_dir / "accuracy_core50_resnet.csv", index=False)
-    logger.info("Saved accuracy_core50_resnet.csv")
+    csv_path = out_dir / "core50_nc_results.csv"
+    df.to_csv(csv_path, index=False)
+    logger.info(f"Benchmark Complete. Results saved to {csv_path}")
 
 
 # ---------------------------------------------------------
@@ -396,10 +375,8 @@ if __name__ == "__main__":
         p=10,
     )
 
-    eval_som(
+    eval_core50_nc(
         som_params=params,
         core50_root="./core50_128x128",
-        output_path="./output_core50",
-        # size_limit=20000,
-        # eval_limit=2000,
+        output_path="./output_core50_nc",
     )
