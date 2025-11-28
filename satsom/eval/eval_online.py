@@ -26,7 +26,7 @@ class EvalDataset(Enum):
 def eval_som(
     som_params: SatSOMParameters,
     output_path: str,
-    device: str = "mps",
+    device: str = "cuda" if torch.cuda.is_available() else "cpu",
     save_images_each_step: bool = False,
     save_model: bool = False,
     enable_logging: bool = True,
@@ -250,11 +250,11 @@ def eval_som(
 
 if __name__ == "__main__":
     params = SatSOMParameters(
-        grid_shape=(100, 100),
+        grid_shape=(30, 30),
         input_dim=28 * 28,
         output_dim=10,
         initial_lr=0.5,
-        initial_sigma=50.0,
+        initial_sigma=3.0,
         Lr=0.01,
         Lr_bias=0.2,
         Lr_sigma=0.05,

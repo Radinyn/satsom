@@ -93,13 +93,23 @@ class SatSOM(nn.Module):
 
         return out
 
+    # Appease CUDA
+    @staticmethod
+    def _fast_cdist(a, b):
+        # a: (B, D)
+        # b: (N, D)
+        a2 = a.pow(2).sum(dim=1, keepdim=True)  # (B, 1)
+        b2 = b.pow(2).sum(dim=1).unsqueeze(0)  # (1, N)
+        ab = a @ b.t()  # (B, N)
+        return torch.sqrt((a2 + b2 - 2 * ab).clamp_min(0.0))
+
     def dists(self, x: torch.Tensor) -> torch.Tensor:
         """
         Pairwise Euclidean distances between x and each neuron weight.
         Returns shape (batch, num_neurons)
         """
         x_flat = x.view(-1, self.params.input_dim)
-        return torch.cdist(x_flat, self.weights)
+        return self._fast_cdist(x_flat, self.weights)
 
     def find_bmu(self, x: torch.Tensor) -> torch.Tensor:
         """

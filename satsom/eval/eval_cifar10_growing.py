@@ -10,6 +10,7 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader
 from torchvision import datasets, transforms, models
 from tqdm.auto import tqdm
+from statistics import mean
 import pandas as pd
 import numpy as np
 
@@ -129,26 +130,23 @@ def eval_som(
     configs = []
     centering_options = [True, False]
 
-    # Naive Growing
-    for centering in centering_options:
-        c_name = "Centered" if centering else "Uncentered"
-        configs.append(
-            {
-                "name": f"Naive_{c_name}",
-                "naive": True,
-                "centering": centering,
-                "scale": 0.0,  # Irrelevant for naive
-            }
-        )
-
-    # Smart Growing with scales [0.0, ..., 1.0]
     scales = [round(x * 0.1, 1) for x in range(11)]  # 0.0 to 1.0
     for s in scales:
         for centering in centering_options:
             c_name = "Centered" if centering else "Uncentered"
+
             configs.append(
                 {
-                    "name": f"Smart_Scale_{s}_{c_name}",
+                    "name": f"Naive_{s}_{c_name}",
+                    "naive": True,
+                    "centering": centering,
+                    "scale": s,
+                }
+            )
+
+            configs.append(
+                {
+                    "name": f"Smart_{s}_{c_name}",
                     "naive": False,
                     "centering": centering,
                     "scale": s,
@@ -175,11 +173,7 @@ def eval_som(
         ).to(device)
 
         # Phase Loop
-        seen_labels = []
-
         for phase_idx, phase_labels in enumerate(phases, start=1):
-            seen_labels.extend(phase_labels)
-
             # Prepare Training Data for Phase
             imgs_list = [by_label["train"][lbl] for lbl in phase_labels]
             if not imgs_list:
@@ -219,7 +213,8 @@ def eval_som(
             current_grid = model.satsom.params.grid_shape
             network_size = int(np.prod(current_grid))
 
-            # 2. Evaluation (Accuracy on all seen classes so far)
+            # 2. Evaluation (Accuracy on all classes)
+            phase_accuracy = []
 
             for lbl in unique_labels:
                 # Only evaluate on labels we have test data for
@@ -229,17 +224,21 @@ def eval_som(
                 test_imgs = by_label["test"][lbl]
 
                 # Predict
-                model.eval()
-                with torch.no_grad():
-                    preds = model(test_imgs)  # (N, n_classes)
-                pred_lbls = preds.argmax(dim=1)
+                accuracy = (
+                    100
+                    * sum(
+                        (int(model(img.unsqueeze(0)).argmax().item()) == int(lbl))
+                        for img in test_imgs
+                    )
+                    / len(test_imgs)
+                )
 
-                acc = (pred_lbls == lbl).float().mean().item() * 100.0
+                phase_accuracy.append(accuracy)
 
                 record = {
                     "config": conf["name"],
                     "naive_growing": conf["naive"],
-                    "centering_enabled": conf["centering"],  # Added to CSV
+                    "centering_enabled": conf["centering"],
                     "radius_threshold_scale": conf["scale"],
                     "phase": phase_idx,
                     "phase_labels": str(phase_labels),
@@ -247,12 +246,12 @@ def eval_som(
                     "grid_h": current_grid[0],
                     "grid_w": current_grid[1],
                     "eval_label": lbl,
-                    "accuracy": acc,
+                    "accuracy": accuracy,
                 }
                 all_records.append(record)
 
             logger.info(
-                f"Phase {phase_idx} Complete. Size: {current_grid} ({network_size} neurons). Average accuracy: {acc:.2f}%"
+                f"Phase {phase_idx} Complete. Size: {current_grid} ({network_size} neurons). Average accuracy: {mean(phase_accuracy):.2f}%"
             )
 
     # 5. Save Results
