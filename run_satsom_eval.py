@@ -83,7 +83,7 @@ def parse_args():
     p.add_argument(
         "--dataset",
         type=str,
-        choices=["cifar10", "cifar100", "core50", "online", "memory"],
+        choices=["cifar10", "cifar100", "core50", "online", "memory", "growing"],
         required=True,
         help="Which evaluation script to run.",
     )
