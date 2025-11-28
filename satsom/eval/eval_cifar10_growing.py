@@ -83,7 +83,7 @@ def extract_cifar_features(
 # 2. Evaluation Logic
 # ---------------------------------------------------------
 def eval_som(
-    base_params: SatSOMParameters,
+    som_params: SatSOMParameters,
     output_path: str,
     device: str = "cuda" if torch.cuda.is_available() else "cpu",
     train_perc: float = 0.8,
@@ -104,7 +104,7 @@ def eval_som(
     features, labels = extract_cifar_features(dataset_root_dir, device)
 
     # Update input dim based on features
-    base_params.input_dim = features.shape[1]
+    som_params.input_dim = features.shape[1]
 
     # Move to device
     features = features.to(device)
@@ -164,7 +164,7 @@ def eval_som(
         logger.info(f"--- Running Configuration: {conf['name']} ---")
 
         # Reset params for each run to ensure clean state
-        run_params = copy.deepcopy(base_params)
+        run_params = copy.deepcopy(som_params)
 
         # Initialize Model
         model = GrowingSatSOM(
@@ -279,4 +279,4 @@ if __name__ == "__main__":
         p=10.0,
     )
 
-    eval_som(base_params=params, output_path="./output_cifar10_growing", train_perc=0.8)
+    eval_som(som_params=params, output_path="./output_cifar10_growing", train_perc=0.8)

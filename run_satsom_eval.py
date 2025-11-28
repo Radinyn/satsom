@@ -177,13 +177,6 @@ def main():
                 device=args.device,
                 dataset_root_dir=args.dataset_root,
                 train_perc=args.train_perc,
-                size_limit=args.size_limit,
-                eval_limit=args.eval_limit,
-                epochs_per_phase=args.epochs_per_phase,
-                save_model=args.save_model,
-                save_images_each_step=args.save_images,
-                enable_logging=args.enable_logging,
-                show_progress=args.show_progress,
             )
 
         elif args.dataset == "cifar100":
@@ -194,13 +187,6 @@ def main():
                 device=args.device,
                 dataset_root_dir=args.dataset_root,
                 train_perc=args.train_perc,
-                size_limit=args.size_limit,
-                eval_limit=args.eval_limit,
-                epochs_per_phase=args.epochs_per_phase,
-                save_model=args.save_model,
-                save_images_each_step=args.save_images,
-                enable_logging=args.enable_logging,
-                show_progress=args.show_progress,
             )
 
         elif args.dataset == "core50":
