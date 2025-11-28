@@ -93,7 +93,6 @@ class SatSOM(nn.Module):
 
         return out
 
-    # Appease CUDA
     @staticmethod
     def _fast_cdist(a, b):
         # a: (B, D)

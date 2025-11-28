@@ -60,75 +60,67 @@ class GrowingSatSOM(nn.Module):
         offset: tuple[int, int],
         old_bounds: tuple[int, int, int, int],
     ):
-        """Transfers weights from current satsom to new_som at specified offset."""
+        """
+        Transfers a rectangular region of neurons from self.satsom -> new_som.
+        """
         r_min, r_max, c_min, c_max = old_bounds
         r_off, c_off = offset
 
         H_old, W_old = self.satsom.params.grid_shape
+        H_new, W_new = (
+            new_som.params.grid_shape
+        )  # In our code they should be the same as the old ones
 
-        # With the current usage they are always equal to old dimensions
-        H_new, W_new = new_som.params.grid_shape
+        D = self.satsom.params.input_dim
+        C = self.satsom.params.output_dim
 
-        # Reshape current state to 2D grid for slicing
-        old_w = self.satsom.weights.view(H_old, W_old, -1)
-        old_lr = self.satsom.learning_rates.view(H_old, W_old)
-        old_sig = self.satsom.sigmas.view(H_old, W_old)
-        old_lbl = self.satsom.labels.view(H_old, W_old, -1)
-
-        # Prepare target state
-        new_w = new_som.weights.view(H_new, W_new, -1)
-        new_lr = new_som.learning_rates.view(H_new, W_new)
-        new_sig = new_som.sigmas.view(H_new, W_new)
-        new_lbl = new_som.labels.view(H_new, W_new, -1)
-
-        # Determine slice dimensions
         h_slice = r_max - r_min + 1
         w_slice = c_max - c_min + 1
 
-        # Copy data
+        # ----- 1) Build old (source) flat indices -----
+        row_indices_old = torch.arange(
+            r_min, r_max + 1, device=self.satsom.weights.device
+        )
+        col_indices_old = torch.arange(
+            c_min, c_max + 1, device=self.satsom.weights.device
+        )
+
+        r_old_idx, c_old_idx = torch.meshgrid(
+            row_indices_old, col_indices_old, indexing="ij"
+        )
+
+        flat_old_idx = (r_old_idx * W_old + c_old_idx).reshape(
+            -1
+        )  # shape: (h_slice*w_slice,)
+
+        # ----- 2) Extract old slices using flat indexing -----
+        old_slice_w = self.satsom.weights[flat_old_idx].view(h_slice, w_slice, D)
+        old_slice_lr = self.satsom.learning_rates[flat_old_idx].view(h_slice, w_slice)
+        old_slice_sig = self.satsom.sigmas[flat_old_idx].view(h_slice, w_slice)
+        old_slice_lbl = self.satsom.labels[flat_old_idx].view(h_slice, w_slice, C)
+
+        # ----- 3) Build new (target) wrapped indices -----
+        row_indices_new = (
+            torch.arange(r_off, r_off + h_slice, device=new_som.weights.device) % H_new
+        )
+        col_indices_new = (
+            torch.arange(c_off, c_off + w_slice, device=new_som.weights.device) % W_new
+        )
+
+        r_new_idx, c_new_idx = torch.meshgrid(
+            row_indices_new, col_indices_new, indexing="ij"
+        )
+
+        flat_new_idx = (r_new_idx * W_new + c_new_idx).reshape(
+            -1
+        )  # same shape as flat_old_idx
+
+        # ----- 4) Scatter-copy to target flat arrays -----
         with torch.no_grad():
-            # 1. New (Target) Index Calculation with Toroidal Wrapping
-            # Indices for the rows/cols in the new map, wrapped around H_new/W_new
-            row_indices_new = (
-                torch.arange(r_off, r_off + h_slice, device=new_w.device) % H_new
-            ).long()
-            col_indices_new = (
-                torch.arange(c_off, c_off + w_slice, device=new_w.device) % W_new
-            ).long()
-
-            # Create a 2D meshgrid of indices for the new map (where to write)
-            r_idx, c_idx = torch.meshgrid(
-                row_indices_new, col_indices_new, indexing="ij"
-            )
-
-            # 2. Old (Source) Index Calculation
-            # Indices for the rows/cols in the old map (what to read)
-            row_indices_old = torch.arange(r_min, r_max + 1, device=new_w.device).long()
-            col_indices_old = torch.arange(c_min, c_max + 1, device=new_w.device).long()
-
-            # Create a 2D meshgrid of indices for the old map (where to read from)
-            r_old_idx, c_old_idx = torch.meshgrid(
-                row_indices_old, col_indices_old, indexing="ij"
-            )
-
-            # 3. Use advanced indexing (r_idx, c_idx) to copy data
-
-            # Read slices from old map
-            old_slice_w = old_w[r_old_idx, c_old_idx]
-            old_slice_lr = old_lr[r_old_idx, c_old_idx]
-            old_slice_sig = old_sig[r_old_idx, c_old_idx]
-            old_slice_lbl = old_lbl[r_old_idx, c_old_idx]
-
-            # Write to the new map using the wrapped indices
-            new_w[r_idx, c_idx] = old_slice_w
-            new_lr[r_idx, c_idx] = old_slice_lr
-            new_sig[r_idx, c_idx] = old_slice_sig
-            new_lbl[r_idx, c_idx] = old_slice_lbl
-
-            new_som.weights.data = new_w.reshape(-1, new_som.params.input_dim)
-            new_som.learning_rates.data = new_lr.reshape(-1)
-            new_som.sigmas.data = new_sig.reshape(-1)
-            new_som.labels.data = new_lbl.reshape(-1, new_som.params.output_dim)
+            new_som.weights[flat_new_idx] = old_slice_w.reshape(-1, D)
+            new_som.learning_rates[flat_new_idx] = old_slice_lr.reshape(-1)
+            new_som.sigmas[flat_new_idx] = old_slice_sig.reshape(-1)
+            new_som.labels[flat_new_idx] = old_slice_lbl.reshape(-1, C)
 
     def center_map(self):
         """Centers the active neuron bounding box within the current grid."""
