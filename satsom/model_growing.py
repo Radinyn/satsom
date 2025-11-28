@@ -45,7 +45,7 @@ class GrowingSatSOM(nn.Module):
 
         if not active_2d.any():
             # If nothing active, return center pixel or full bounds
-            return active_2d, (0, H, 0, W)
+            return active_2d, (0, H - 1, 0, W - 1)
 
         # Find bounds
         rows, cols = torch.where(active_2d)
@@ -61,66 +61,106 @@ class GrowingSatSOM(nn.Module):
         old_bounds: tuple[int, int, int, int],
     ):
         """
-        Transfers a rectangular region of neurons from self.satsom -> new_som.
+        GPU-safe transfer of a rectangular block of neurons from self.satsom -> new_som.
         """
         r_min, r_max, c_min, c_max = old_bounds
         r_off, c_off = offset
 
         H_old, W_old = self.satsom.params.grid_shape
-        H_new, W_new = (
-            new_som.params.grid_shape
-        )  # In our code they should be the same as the old ones
+        H_new, W_new = new_som.params.grid_shape
 
+        num_neurons = self.satsom.num_neurons
         D = self.satsom.params.input_dim
         C = self.satsom.params.output_dim
 
+        # Quick sanity on bounds
+        assert 0 <= r_min <= r_max < H_old, f"Row bounds out of range: {r_min},{r_max}"
+        assert 0 <= c_min <= c_max < W_old, f"Col bounds out of range: {c_min},{c_max}"
+
         h_slice = r_max - r_min + 1
         w_slice = c_max - c_min + 1
+        slice_len = h_slice * w_slice
 
-        # ----- 1) Build old (source) flat indices -----
-        row_indices_old = torch.arange(
-            r_min, r_max + 1, device=self.satsom.weights.device
+        # Ensure all parameter tensors are on the same device and have expected dtypes
+        dev = self.satsom.weights.device
+        # align new_som device as well
+        assert new_som.weights.device == dev, (
+            "new_som tensors must live on same device as self.satsom"
         )
-        col_indices_old = torch.arange(
-            c_min, c_max + 1, device=self.satsom.weights.device
-        )
+
+        # ensure tensors are float where expected
+        assert self.satsom.weights.dtype.is_floating_point, "weights must be float"
+        assert new_som.weights.dtype.is_floating_point, "new weights must be float"
+
+        # Build old (source) flat indices on correct device / dtype
+        row_indices_old = torch.arange(r_min, r_max + 1, device=dev, dtype=torch.long)
+        col_indices_old = torch.arange(c_min, c_max + 1, device=dev, dtype=torch.long)
 
         r_old_idx, c_old_idx = torch.meshgrid(
             row_indices_old, col_indices_old, indexing="ij"
         )
-
         flat_old_idx = (r_old_idx * W_old + c_old_idx).reshape(
             -1
-        )  # shape: (h_slice*w_slice,)
+        )  # shape: (slice_len,)
 
-        # ----- 2) Extract old slices using flat indexing -----
-        old_slice_w = self.satsom.weights[flat_old_idx].view(h_slice, w_slice, D)
-        old_slice_lr = self.satsom.learning_rates[flat_old_idx].view(h_slice, w_slice)
-        old_slice_sig = self.satsom.sigmas[flat_old_idx].view(h_slice, w_slice)
-        old_slice_lbl = self.satsom.labels[flat_old_idx].view(h_slice, w_slice, C)
+        # Sanity checks: indices within [0, num_neurons-1]
+        if flat_old_idx.numel() > 0:
+            max_idx = int(flat_old_idx.max().item())
+            min_idx = int(flat_old_idx.min().item())
+            assert min_idx >= 0, f"Computed flat_old_idx has negative entry: {min_idx}"
+            assert max_idx < num_neurons, (
+                f"Computed flat_old_idx out of range: {max_idx} >= {num_neurons}"
+            )
 
-        # ----- 3) Build new (target) wrapped indices -----
-        row_indices_new = (
-            torch.arange(r_off, r_off + h_slice, device=new_som.weights.device) % H_new
-        )
-        col_indices_new = (
-            torch.arange(c_off, c_off + w_slice, device=new_som.weights.device) % W_new
-        )
-
-        r_new_idx, c_new_idx = torch.meshgrid(
-            row_indices_new, col_indices_new, indexing="ij"
-        )
-
-        flat_new_idx = (r_new_idx * W_new + c_new_idx).reshape(
-            -1
-        )  # same shape as flat_old_idx
-
-        # ----- 4) Scatter-copy to target flat arrays -----
+        # Extract old slices using flat indexing; use index_select for clarity
         with torch.no_grad():
-            new_som.weights[flat_new_idx] = old_slice_w.reshape(-1, D)
-            new_som.learning_rates[flat_new_idx] = old_slice_lr.reshape(-1)
-            new_som.sigmas[flat_new_idx] = old_slice_sig.reshape(-1)
-            new_som.labels[flat_new_idx] = old_slice_lbl.reshape(-1, C)
+            # shape (slice_len, D)
+            old_flat_w = self.satsom.weights.index_select(0, flat_old_idx)
+            old_flat_lr = self.satsom.learning_rates.index_select(0, flat_old_idx)
+            old_flat_sig = self.satsom.sigmas.index_select(0, flat_old_idx)
+            old_flat_lbl = self.satsom.labels.index_select(0, flat_old_idx)
+
+            # reshape to 2D grid form (h_slice, w_slice, ...)
+            old_slice_w = old_flat_w.view(h_slice, w_slice, D)
+            old_slice_lr = old_flat_lr.view(h_slice, w_slice)
+            old_slice_sig = old_flat_sig.view(h_slice, w_slice)
+            old_slice_lbl = old_flat_lbl.view(h_slice, w_slice, C)
+
+            # Build new (target) wrapped indices on same device
+            row_indices_new = (
+                torch.arange(r_off, r_off + h_slice, device=dev, dtype=torch.long)
+                % H_new
+            )
+            col_indices_new = (
+                torch.arange(c_off, c_off + w_slice, device=dev, dtype=torch.long)
+                % W_new
+            )
+
+            r_new_idx, c_new_idx = torch.meshgrid(
+                row_indices_new, col_indices_new, indexing="ij"
+            )
+            flat_new_idx = (r_new_idx * W_new + c_new_idx).reshape(-1)
+
+            # Sanity checks for new indices
+            if flat_new_idx.numel() > 0:
+                max_new = int(flat_new_idx.max().item())
+                min_new = int(flat_new_idx.min().item())
+                assert min_new >= 0 and max_new < new_som.num_neurons, (
+                    f"Computed flat_new_idx out of range: [{min_new}, {max_new}] vs num_neurons {new_som.num_neurons}"
+                )
+
+            # Finally scatter into new_som's flat parameter tensors
+            # reshape old slices into (slice_len, ...)
+            new_flat_w = old_slice_w.reshape(slice_len, D)
+            new_flat_lr = old_slice_lr.reshape(slice_len)
+            new_flat_sig = old_slice_sig.reshape(slice_len)
+            new_flat_lbl = old_slice_lbl.reshape(slice_len, C)
+
+            # assign in-place
+            new_som.weights[flat_new_idx] = new_flat_w
+            new_som.learning_rates[flat_new_idx] = new_flat_lr
+            new_som.sigmas[flat_new_idx] = new_flat_sig
+            new_som.labels[flat_new_idx] = new_flat_lbl
 
     def center_map(self):
         """Centers the active neuron bounding box within the current grid."""
