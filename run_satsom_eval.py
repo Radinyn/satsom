@@ -11,6 +11,7 @@ from satsom.eval import (
     eval_cifar10,
     eval_cifar100,
     eval_core50,
+    eval_cifar10_growing,
     measure_memory,
 )
 from satsom.eval.eval import EvalDataset
@@ -246,6 +247,15 @@ def main():
                 save_images_each_step=args.save_images,
                 enable_logging=args.enable_logging,
                 show_progress=args.show_progress,
+            )
+
+        elif args.dataset == "growing":
+            eval_cifar10_growing.eval_som(
+                som_params=params,
+                output_path=run_output_path,
+                device=args.device,
+                dataset_root_dir=args.dataset_root,
+                train_perc=args.train_perc,
             )
 
 
