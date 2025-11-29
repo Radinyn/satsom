@@ -193,7 +193,9 @@ def eval_som(
         # Simple loop:
         for t_img in test_X:
             preds_som.append(model(t_img.unsqueeze(0)).argmax().item())
-        acc_som = (torch.Tensor(preds_som) == test_Y).float().mean().item() * 100
+        acc_som = (
+            torch.Tensor(preds_som).to(device=device) == test_Y
+        ).float().mean().item() * 100
 
         # kNN Eval
         pred_knn = knn.predict(test_X)
