@@ -12,6 +12,7 @@ from satsom.eval import (
     eval_cifar100,
     eval_core50,
     eval_cifar10_growing,
+    eval_cifar10_efficiency,
     measure_memory,
 )
 from satsom.eval.eval import EvalDataset
@@ -83,7 +84,15 @@ def parse_args():
     p.add_argument(
         "--dataset",
         type=str,
-        choices=["cifar10", "cifar100", "core50", "online", "memory", "growing"],
+        choices=[
+            "cifar10",
+            "cifar100",
+            "core50",
+            "online",
+            "memory",
+            "growing",
+            "efficiency",
+        ],
         required=True,
         help="Which evaluation script to run.",
     )
@@ -242,6 +251,14 @@ def main():
                 device=args.device,
                 dataset_root_dir=args.dataset_root,
                 train_perc=args.train_perc,
+            )
+
+        elif args.dataset == "efficiency":
+            eval_cifar10_efficiency.eval_som(
+                som_params=params,
+                output_path=run_output_path,
+                device=args.device,
+                dataset_root_dir=args.dataset_root,
             )
 
 
