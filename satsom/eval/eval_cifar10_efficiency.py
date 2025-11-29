@@ -187,22 +187,13 @@ def eval_som(
         # -------------------------------------------------
         logger.info(f"Evaluating models on full Test Set ({len(test_X)} samples)...")
 
-        # SatSOM Eval
+        # SOM (batch evaluation for speed)
         preds_som = []
-        # Batch eval for SOM is faster than single loop
-        batch_size_eval = 1000
-        with torch.no_grad():
-            for i in range(0, len(test_X), batch_size_eval):
-                batch = test_X[i : i + batch_size_eval]
-                # SatSOM forward returns similarities or activation, we need class prediction
-                # Assuming model() returns best matching unit or class weights
-                # Standard SatSOM usage often requires a prediction method.
-                # If model() returns logits/activations:
-                out = model(batch)
-                preds_som.append(out.argmax(dim=1))
-
-        preds_som = torch.cat(preds_som)
-        acc_som = (preds_som == test_Y).float().mean().item() * 100
+        # Evaluate in small chunks if memory is tight, though 512 floats is small
+        # Simple loop:
+        for t_img in test_X:
+            preds_som.append(model(t_img.unsqueeze(0)).argmax().item())
+        acc_som = (torch.Tensor(preds_som) == test_Y).float().mean().item() * 100
 
         # kNN Eval
         pred_knn = knn.predict(test_X)
