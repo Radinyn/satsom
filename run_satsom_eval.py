@@ -149,6 +149,13 @@ def parse_args():
         action="store_false",
         help="Disable tqdm bars",
     )
+    p.add_argument(
+        "--step",
+        dest="step",
+        type=int,
+        default=1,
+        help="Step to use for Cifar100 experiment",
+    )
     return p.parse_args()
 
 
@@ -196,6 +203,7 @@ def main():
                 device=args.device,
                 dataset_root_dir=args.dataset_root,
                 train_perc=args.train_perc,
+                step=args.step,
             )
 
         elif args.dataset == "core50":

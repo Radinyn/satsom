@@ -95,6 +95,7 @@ def eval_som(
     eval_limit: Optional[int] = None,
     phases: Optional[list[list[int]]] = None,
     dataset_root_dir: Optional[str] = None,
+    step: int = 1,
 ):
     """
     Train SatSOM, DSDM, PROPRE on CIFAR100 Embeddings with incremental phases.
@@ -148,9 +149,17 @@ def eval_som(
         by_label["train"][lbl] = imgs_lbl[:n_train]
         by_label["test"][lbl] = imgs_lbl[n_train:]
 
-    # default: each class is a phase
+    # default: build phases automatically using a "step" size
     if phases is None:
-        phases = [[lbl] for lbl in unique_labels]
+        if step < 1:
+            raise ValueError("step must be >= 1")
+
+        phases = []
+        for i in range(0, n_classes, step):
+            group = unique_labels[i : i + step]
+            phases.append(group)
+
+        logger.info(f"Generated {len(phases)} phases with step={step}: {phases}")
 
     # ----------------------------------------------
     # Models
