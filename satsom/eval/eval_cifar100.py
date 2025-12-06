@@ -27,9 +27,9 @@ def extract_cifar100_features(
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """
     Loads CIFAR100 (Train + Test), resizes to 224x224,
-    passes through ResNet18 (ImageNet weights), returns embeddings.
+    passes through ResNet50 (ImageNet weights), returns embeddings.
     """
-    print(f"Preparing ResNet18 feature extractor on {device}...")
+    print(f"Preparing ResNet50 feature extractor on {device}...")
 
     # Standard ImageNet preprocessing
     transform = transforms.Compose(
@@ -53,7 +53,7 @@ def extract_cifar100_features(
     loader = DataLoader(full_ds, batch_size=batch_size, shuffle=False, num_workers=2)
 
     # Prepare Model
-    model = models.resnet18(weights=models.ResNet18_Weights.IMAGENET1K_V1)
+    model = models.resnet50(weights=models.ResNet50_Weights.IMAGENET1K_V1)
     model.fc = nn.Identity()  # Remove classification head
     model.to(device)
     model.eval()

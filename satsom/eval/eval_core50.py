@@ -123,7 +123,7 @@ def get_core50_data(
 
     Returns: (train_x, train_y, test_x, test_y)
     """
-    print(f"Generating embeddings using ResNet18 on {device}...")
+    print(f"Generating embeddings using ResNet50 on {device}...")
 
     # Standard ImageNet normalization
     transform = transforms.Compose(
@@ -140,7 +140,7 @@ def get_core50_data(
         ]
     )
 
-    model = models.resnet18(weights=models.ResNet18_Weights.IMAGENET1K_V1)
+    model = models.resnet50(weights=models.ResNet50_Weights.IMAGENET1K_V1)
     model.fc = nn.Identity()
     model.to(device)
     model.eval()
